@@ -25,7 +25,7 @@ routes = web.RouteTableDef()
 
 @routes.get("/")
 async def root_handler(request):
-    return web.Response(text="Bot is Online with Instant Stream! 🟢", status=200)
+    return web.Response(text="Bot is Online! 🟢", status=200)
 
 @routes.get("/dl/{message_id}")
 async def stream_handler(request):
@@ -47,9 +47,8 @@ async def stream_handler(request):
         file_size = getattr(media, "file_size", 0)
         mime_type = getattr(media, "mime_type", "application/octet-stream")
         
-        # Unique Path for every request (Taaki mix na ho)
-        # File ka naam thoda unique rakhenge time ke sath
-        unique_file_path = f"download_{message_id}_{int(time.time())}.temp"
+        # Temp path (Linux ka sabse fast folder)
+        unique_file_path = f"/tmp/download_{message_id}_{int(time.time())}.temp"
 
         # 3. Headers
         headers = {
@@ -61,62 +60,77 @@ async def stream_handler(request):
         response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
         
-        # 4. INSTANT STREAM LOGIC (Read-While-Write)
+        # 4. INSTANT STREAM LOGIC
         
-        # Step A: Download ko background task me start karo
-        # Hum 'await' nahi karenge, taaki niche wala code turant chale
+        # Step A: Download Task Start
         download_task = asyncio.create_task(
             bot.download_media(message, file_name=unique_file_path)
         )
 
-        # Step B: Wait karo jab tak file banna shuru na ho jaye (Max 10 seconds)
+        # Step B: File banna shuru hone ka wait (Timeout badha diya hai)
         start_time = time.time()
-        while not os.path.exists(unique_file_path):
-            if time.time() - start_time > 10:
-                return web.Response(status=500, text="Download Start Timeout")
-            await asyncio.sleep(0.1)
-
-        # Step C: File ko padhna shuru karo (Loop)
-        f = open(unique_file_path, "rb")
-        downloaded_bytes = 0
+        file_created = False
         
-        while True:
-            # File se data padho
-            chunk = f.read(1024 * 1024) # 1MB Chunk
-            
-            if chunk:
-                try:
-                    await response.write(chunk)
-                    downloaded_bytes += len(chunk)
-                except Exception:
-                    # Agar user bhaag gaya (Disconnect)
+        while not file_created:
+            # Agar file disk par aa gayi, to loop todo
+            if os.path.exists(unique_file_path):
+                # Check karo file khali to nahi hai (size > 0)
+                if os.path.getsize(unique_file_path) > 0:
+                    file_created = True
                     break
-            else:
-                # Agar chunk khali hai, iska matlab download abhi chal raha hai
-                # Ya fir download khatam ho gaya hai
-                if download_task.done():
-                    break # Download complete, loop band
-                else:
-                    # Download chal raha hai, thoda wait karo data aane ka
-                    await asyncio.sleep(0.5)
 
-        # 5. Cleanup (Kachra saaf karo)
-        f.close()
-        # Task ko cancel karo agar wo abhi bhi chal raha hai
+            # Agar Task fail ho gaya (Telegram error)
+            if download_task.done():
+                try:
+                    # Error kya tha? wo check karo
+                    await download_task
+                except Exception as e:
+                    logger.error(f"Download Task Failed: {e}")
+                    return web.Response(status=500, text=f"Download Failed: {e}")
+                break
+
+            # Timeout check (60 Seconds)
+            if time.time() - start_time > 60:
+                logger.error("Timeout: File start hone me der lag rahi hai.")
+                # Task cancel karo
+                if not download_task.done():
+                    download_task.cancel()
+                return web.Response(status=504, text="Timeout: Telegram didn't respond in 60s")
+
+            await asyncio.sleep(0.5)
+
+        # Step C: File Padho aur Bhejo (Read-While-Write)
+        # Hum 'with open' use karenge taaki file jarur close ho
+        try:
+            with open(unique_file_path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024) # 1MB Chunk
+                    
+                    if chunk:
+                        try:
+                            await response.write(chunk)
+                        except Exception:
+                            # User disconnect
+                            break
+                    else:
+                        # Agar chunk nahi mila, check karo download khatam hua kya
+                        if download_task.done():
+                            break
+                        # Download chal raha hai, thoda wait karo
+                        await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Streaming Error: {e}")
+        
+        # Cleanup
         if not download_task.done():
             download_task.cancel()
-        
-        # File delete karo taaki storage na bhare
         if os.path.exists(unique_file_path):
             os.remove(unique_file_path)
             
         return response
 
     except Exception as e:
-        logger.error(f"Stream Error: {e}")
-        # Cleanup in case of error
-        if 'unique_file_path' in locals() and os.path.exists(unique_file_path):
-            os.remove(unique_file_path)
+        logger.error(f"Main Error: {e}")
         return web.Response(status=500, text="Internal Server Error")
 
 # --- COMMANDS ---
@@ -154,4 +168,3 @@ async def start_services():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(start_services())
-    
