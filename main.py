@@ -4,7 +4,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 
 # --- CONFIGURATION ---
 BOT_TOKEN = "7517788313:AAFzuh06eU-junoxoaCOWXq1o8I8KRAmo4U"  # BotFather वाला टोकन यहाँ डालें
-OWNER_ID = 123456789  # UserInfoBot से मिला हुआ अपना ID नंबर यहाँ डालें (बिना quotes के)
+OWNER_ID = 800000580 # UserInfoBot से मिला हुआ अपना ID नंबर यहाँ डालें (बिना quotes के)
 
 # Logging set karein taki koi error aaye to dikh jaye
 logging.basicConfig(
