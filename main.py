@@ -1,28 +1,29 @@
 import os
 import logging
+import asyncio
 from aiohttp import web
-from pyrogram import Client, filters, errors
+from pyrogram import Client, filters, idle
 from config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, APP_URL, LOG_CHANNEL_ID
 
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- BOT SETUP (High Speed Config) ---
+# --- BOT SETUP ---
 bot = Client(
     "my_bot_session",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    ipv6=False  # Koyeb par speed badhane ke liye false rakha hai
+    ipv6=False
 )
 
-# --- WEB SERVER ---
+# --- WEB SERVER (High Speed Logic) ---
 routes = web.RouteTableDef()
 
 @routes.get("/")
 async def root_handler(request):
-    return web.Response(text="Bot is Running High Speed! ⚡", status=200)
+    return web.Response(text="Bot is Online & Healthy! 🟢", status=200)
 
 @routes.get("/dl/{message_id}")
 async def stream_handler(request):
@@ -32,7 +33,7 @@ async def stream_handler(request):
         # 1. File dhoondna (Storage Channel se)
         try:
             message = await bot.get_messages(chat_id=LOG_CHANNEL_ID, message_ids=message_id)
-        except Exception as e:
+        except Exception:
             return web.Response(status=404, text="File Not Found in Storage Channel")
 
         media = message.document or message.video or message.audio or message.photo
@@ -40,28 +41,26 @@ async def stream_handler(request):
         if not media:
             return web.Response(status=404, text="Media Not Found")
 
-        # 2. File Details nikalna
+        # 2. File Details
         file_name = getattr(media, "file_name", f"file_{message_id}.mp4")
         file_size = getattr(media, "file_size", 0)
         mime_type = getattr(media, "mime_type", "application/octet-stream")
 
-        # 3. Browser ko batana ki file aane wali hai (Headers)
+        # 3. Headers (Browser ko size batane ke liye)
         headers = {
             'Content-Type': mime_type,
             'Content-Disposition': f'attachment; filename="{file_name}"',
-            'Content-Length': str(file_size) # Ye Browser ko progress bar dikhayega
+            'Content-Length': str(file_size)
         }
 
         response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
         
-        # 4. Stream Loop (Telegram -> Server -> User)
-        # 1MB ke chunks me download karenge (1024*1024)
+        # 4. Fast Download Stream
         async for chunk in bot.download_media(message, stream=True):
             try:
                 await response.write(chunk)
             except Exception:
-                # Agar user download cancel kar de ya connection toot jaye
                 break
             
         return response
@@ -74,38 +73,44 @@ async def stream_handler(request):
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
     if message.from_user.id not in OWNER_IDS: return
-    await message.reply_text(f"⚡ **Speed Bot Online!**\nServer: {APP_URL}")
+    await message.reply_text(f"✅ **Bot Online!**\nServer: {APP_URL}")
 
 @bot.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
 async def file_handler(client, message):
     if message.from_user.id not in OWNER_IDS: return
 
-    sts = await message.reply("⚡ **स्टोरेज में भेज रहा हूँ...**")
+    sts = await message.reply("⚡ **Processing...**")
     try:
-        # File Storage Channel me bhejna
         log_msg = await message.forward(LOG_CHANNEL_ID)
-        
         link = f"{APP_URL}/dl/{log_msg.id}"
         
         await sts.edit_text(
-            f"✅ **लिंक तैयार है!**\n\n"
-            f"📂 **फाइल:** `{getattr(message.document or message.video, 'file_name', 'File')}`\n"
-            f"🔗 **Link:**\n`{link}`\n\n"
-            f"⚠️ *Browser या ADM का इस्तेमाल करें।*"
+            f"✅ **Link Generated!**\n\n"
+            f"📂 `{getattr(message.document or message.video, 'file_name', 'File')}`\n"
+            f"🔗 `{link}`"
         )
     except Exception as e:
         await sts.edit_text(f"❌ Error: {e}")
 
-# --- RUNNER ---
-if __name__ == "__main__":
+# --- START SERVICE (Stable Method) ---
+async def start_services():
+    # 1. Web Server Start
     app = web.Application()
     app.add_routes(routes)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8000))
+    await web.TCPSite(runner, "0.0.0.0", port).start()
     
-    # Port Config
-    PORT = int(os.environ.get("PORT", 8000))
+    # 2. Bot Start
+    await bot.start()
+    logger.info("Bot & Server Started Successfully!")
     
-    # Run
-    bot.start()
-    logger.info(f"Bot Started on Port {PORT}")
-    web.run_app(app, port=PORT)
+    # 3. Keep Alive (Idle)
+    await idle()
+    await bot.stop()
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(start_services())
     
