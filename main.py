@@ -1,14 +1,14 @@
 import os
 import logging
-from aiohttp import web
-from pyrogram import Client, filters
-from pyrogram.types import Message
 import asyncio
+from aiohttp import web
+from pyrogram import Client, filters, errors
+from pyrogram.types import Message
 
-# Config file se details le rahe hain
-from config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, APP_URL
+# Config se details le rahe hain
+from config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, APP_URL, LOG_CHANNEL_ID
 
-# --- LOGGING SETUP ---
+# --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -20,44 +20,40 @@ bot = Client(
     bot_token=BOT_TOKEN
 )
 
-# --- WEB SERVER HANDLERS ---
+# --- WEB SERVER ---
 routes = web.RouteTableDef()
 
 @routes.get("/")
 async def root_handler(request):
-    return web.Response(text="Bot is Online & Working for Multiple Owners! 🚀")
+    return web.Response(text="Bot is Online with Storage Channel! 🚀")
 
-# Naya Link Format: /dl/{user_id}/{message_id}
-@routes.get("/dl/{chat_id}/{message_id}")
+@routes.get("/dl/{message_id}")
 async def stream_handler(request):
     try:
-        # URL se Chat ID aur Message ID nikalna
-        chat_id = int(request.match_info['chat_id'])
+        # URL se Message ID nikalna
         message_id = int(request.match_info['message_id'])
         
-        # Security: Check karein ki file mangne wala Chat ID hamare Owners me hai ya nahi
-        if chat_id not in OWNER_IDS:
-            return web.Response(status=403, text="Access Denied: Unknown User File")
+        # NOTE: Ab hum file 'Private Chat' se nahi, balki 'Storage Channel' se uthayenge
+        # Isse 404 Error nahi aata.
+        try:
+            message = await bot.get_messages(chat_id=LOG_CHANNEL_ID, message_ids=message_id)
+        except Exception as e:
+             return web.Response(status=404, text="File Not Found in Storage Channel")
 
-        # File ko sahi user ki chat se fetch karna
-        message = await bot.get_messages(chat_id=chat_id, message_ids=message_id)
         media = message.document or message.video or message.audio or message.photo
         
         if not media:
             return web.Response(status=404, text="File Not Found")
 
-        # File details
         file_name = getattr(media, "file_name", "file")
         mime_type = getattr(media, "mime_type", "application/octet-stream")
         
-        # Streaming Response setup
         response = web.StreamResponse()
         response.headers['Content-Type'] = mime_type
         response.headers['Content-Disposition'] = f'attachment; filename="{file_name}"'
         
         await response.prepare(request)
         
-        # Stream download (Koyeb Friendly)
         async for chunk in bot.download_media(message, stream=True):
             await response.write(chunk)
             
@@ -71,47 +67,45 @@ async def stream_handler(request):
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
-    # Check karein ki user hamare Owners list me hai ya nahi
     if message.from_user.id not in OWNER_IDS:
         return await message.reply("⛔ यह बॉट प्राइवेट है।")
         
     await message.reply_text(
-        "👋 **नमस्ते बॉस!**\n\n"
-        "मैं अब **Dual Owner Mode** में हूँ।\n"
-        "आप दोनों में से कोई भी फाइल भेजेगा, मैं उसका लिंक बना दूंगा।\n\n"
-        f"🌍 **Server URL:** `{APP_URL}`"
+        "👋 **सिस्टम अपग्रेड हो गया है!**\n\n"
+        "अब आप जो भी फाइल भेजेंगे, वो **Storage Channel** में सेव होगी "
+        "और उसका लिंक कभी एक्सपायर नहीं होगा (No 404 Error)।\n\n"
+        "🚀 **फाइल भेजें और जादू देखें!**"
     )
 
 @bot.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
 async def file_handler(client, message: Message):
-    # Check User
     if message.from_user.id not in OWNER_IDS:
         return
 
-    wait_msg = await message.reply_text("🔄 **लिंक जनरेट कर रहा हूँ...**")
-    
-    # URL Check
-    if "example.com" in APP_URL or "placeholder" in APP_URL:
-        await wait_msg.edit_text("⚠️ **Error:** `config.py` में Koyeb का URL अपडेट करें।")
-        return
+    status_msg = await message.reply_text("🔄 **फाइल को स्टोरेज में सेव कर रहा हूँ...**")
 
-    # Link banana (Ab isme Chat ID bhi judega)
-    chat_id = message.from_user.id
-    msg_id = message.id
-    stream_link = f"{APP_URL}/dl/{chat_id}/{msg_id}"
-    
-    file_name = getattr(message.document or message.video or message.audio, "file_name", "Media_File")
-    
-    await wait_msg.edit_text(
-        f"✅ **लिंक तैयार है!**\n\n"
-        f"📂 **फाइल:** `{file_name}`\n"
-        f"🔗 **डाउनलोड लिंक:**\n`{stream_link}`\n\n"
-        f"⚡ *यह लिंक आप किसी को भी शेयर कर सकते हैं।*"
-    )
+    try:
+        # 1. Pehle file ko Storage Channel me forward karein
+        log_msg = await message.forward(LOG_CHANNEL_ID)
+        
+        # 2. Ab link us forwarded message ka banayenge
+        stream_link = f"{APP_URL}/dl/{log_msg.id}"
+        
+        file_name = getattr(message.document or message.video or message.audio, "file_name", "Media_File")
+        
+        await status_msg.edit_text(
+            f"✅ **लिंक तैयार है!** (100% Working)\n\n"
+            f"📂 **फाइल:** `{file_name}`\n"
+            f"🔗 **डाउनलोड लिंक:**\n`{stream_link}`\n\n"
+            f"💾 *यह फाइल स्टोरेज चैनल में सुरक्षित है।*"
+        )
+    except errors.ChatAdminRequired:
+        await status_msg.edit_text("❌ **Error:** बॉट को Storage Channel में **Admin** बनाएं।")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ **Error:** {e}\n(Check LOG_CHANNEL_ID in Koyeb)")
 
-# --- START SERVICE ---
+# --- RUNNER ---
 async def start_services():
-    # Web App
     app = web.Application()
     app.add_routes(routes)
     runner = web.AppRunner(app)
@@ -119,11 +113,9 @@ async def start_services():
     port = int(os.environ.get("PORT", 8000))
     await web.TCPSite(runner, "0.0.0.0", port).start()
     
-    # Bot Start
     await bot.start()
-    logger.info("Bot Started & Web Server Live")
+    logger.info("Bot Started!")
     
-    # Idle
     from pyrogram import idle
     await idle()
     await bot.stop()
