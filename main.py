@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import time
 from aiohttp import web
 from pyrogram import Client, filters, idle
 from config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, APP_URL, LOG_CHANNEL_ID
@@ -8,24 +9,6 @@ from config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, APP_URL, LOG_CHANNEL_
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# --- QUEUE STREAMER CLASS (Ye Magic Hai) ---
-# Ye class file ko download karte hi turant user ko bhej degi
-class FileLikeObject:
-    def __init__(self, queue):
-        self.queue = queue
-        self.name = "file" # Pyrogram needs a name attribute
-
-    def write(self, data):
-        # Jaise hi data mile, queue me daal do (Sync method called by Pyrogram)
-        self.queue.put_nowait(data)
-        return len(data)
-
-    def close(self):
-        pass
-
-    def flush(self):
-        pass
 
 # --- BOT SETUP ---
 bot = Client(
@@ -42,7 +25,7 @@ routes = web.RouteTableDef()
 
 @routes.get("/")
 async def root_handler(request):
-    return web.Response(text="Bot is Online with Queue System! 🟢", status=200)
+    return web.Response(text="Bot is Online with Instant Stream! 🟢", status=200)
 
 @routes.get("/dl/{message_id}")
 async def stream_handler(request):
@@ -59,12 +42,16 @@ async def stream_handler(request):
         if not media:
             return web.Response(status=404, text="No Media Found")
 
-        # 2. Details
+        # 2. File Details
         file_name = getattr(media, "file_name", f"file_{message_id}.mp4")
         file_size = getattr(media, "file_size", 0)
         mime_type = getattr(media, "mime_type", "application/octet-stream")
+        
+        # Unique Path for every request (Taaki mix na ho)
+        # File ka naam thoda unique rakhenge time ke sath
+        unique_file_path = f"download_{message_id}_{int(time.time())}.temp"
 
-        # 3. Headers (Download Start karne ke liye)
+        # 3. Headers
         headers = {
             'Content-Type': mime_type,
             'Content-Disposition': f'attachment; filename="{file_name}"',
@@ -74,62 +61,69 @@ async def stream_handler(request):
         response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
         
-        # 4. QUEUE LOGIC (Sabse important hissa)
-        # Hum ek Queue banayenge. Bot usme data dalega, aur Browser wahan se uthayega.
+        # 4. INSTANT STREAM LOGIC (Read-While-Write)
         
-        data_queue = asyncio.Queue(maxsize=5) # Memory Bachane ke liye maxsize kam rakha hai
-        file_writer = FileLikeObject(data_queue)
-        
-        # Download ko background me start karo (Task)
-        # Hum 'file_name' me apna object denge, taaki Pyrogram usme write kare
+        # Step A: Download ko background task me start karo
+        # Hum 'await' nahi karenge, taaki niche wala code turant chale
         download_task = asyncio.create_task(
-            bot.download_media(message, file_name=file_writer)
+            bot.download_media(message, file_name=unique_file_path)
         )
 
-        # 5. Data User ko bhejna
+        # Step B: Wait karo jab tak file banna shuru na ho jaye (Max 10 seconds)
+        start_time = time.time()
+        while not os.path.exists(unique_file_path):
+            if time.time() - start_time > 10:
+                return web.Response(status=500, text="Download Start Timeout")
+            await asyncio.sleep(0.1)
+
+        # Step C: File ko padhna shuru karo (Loop)
+        f = open(unique_file_path, "rb")
         downloaded_bytes = 0
         
         while True:
-            # Queue se data nikalo
-            # Hum wait karenge jab tak data na aaye ya download khatam na ho jaye
-            try:
-                # 5 second wait karenge data ka
-                chunk = await asyncio.wait_for(data_queue.get(), timeout=5.0)
-                
-                if chunk is None: # End signal
+            # File se data padho
+            chunk = f.read(1024 * 1024) # 1MB Chunk
+            
+            if chunk:
+                try:
+                    await response.write(chunk)
+                    downloaded_bytes += len(chunk)
+                except Exception:
+                    # Agar user bhaag gaya (Disconnect)
                     break
-                    
-                await response.write(chunk)
-                downloaded_bytes += len(chunk)
-                
-                # Agar download complete ho gaya
-                if downloaded_bytes >= file_size:
-                    break
-                    
-            except asyncio.TimeoutError:
-                # Agar 5 second tak data nahi aaya, check karo ki task zinda hai ya nahi
+            else:
+                # Agar chunk khali hai, iska matlab download abhi chal raha hai
+                # Ya fir download khatam ho gaya hai
                 if download_task.done():
-                    break
-                continue
-            except Exception as e:
-                logger.error(f"Stream Error: {e}")
-                break
+                    break # Download complete, loop band
+                else:
+                    # Download chal raha hai, thoda wait karo data aane ka
+                    await asyncio.sleep(0.5)
 
-        # Cleanup
+        # 5. Cleanup (Kachra saaf karo)
+        f.close()
+        # Task ko cancel karo agar wo abhi bhi chal raha hai
         if not download_task.done():
             download_task.cancel()
+        
+        # File delete karo taaki storage na bhare
+        if os.path.exists(unique_file_path):
+            os.remove(unique_file_path)
             
         return response
 
     except Exception as e:
-        logger.error(f"Server Error: {e}")
+        logger.error(f"Stream Error: {e}")
+        # Cleanup in case of error
+        if 'unique_file_path' in locals() and os.path.exists(unique_file_path):
+            os.remove(unique_file_path)
         return web.Response(status=500, text="Internal Server Error")
 
 # --- COMMANDS ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
     if message.from_user.id not in OWNER_IDS: return
-    await message.reply_text(f"🟢 **Queue Bot Online!**\n{APP_URL}")
+    await message.reply_text(f"🟢 **Bot Online!**\n{APP_URL}")
 
 @bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def file_cmd(client, message):
