@@ -3,43 +3,29 @@ import logging
 import asyncio
 from aiohttp import web
 from pyrogram import Client, filters, idle
-from pyrogram.file_id import FileId
-from pyrogram.raw.functions.upload import GetFile
-from pyrogram.raw.types import InputFileLocation
 from config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, APP_URL, LOG_CHANNEL_ID
 
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- CUSTOM STREAMER CLASS ---
-class ByteStreamer:
-    def __init__(self, client, file_id):
-        self.client = client
-        self.file_id = file_id
+# --- QUEUE STREAMER CLASS (Ye Magic Hai) ---
+# Ye class file ko download karte hi turant user ko bhej degi
+class FileLikeObject:
+    def __init__(self, queue):
+        self.queue = queue
+        self.name = "file" # Pyrogram needs a name attribute
 
-    async def yield_chunks(self, offset=0, chunk_size=1024 * 1024):
-        try:
-            decoded = FileId.decode(self.file_id)
-            location = decoded.make_input_location(
-                file_reference=decoded.file_reference
-            )
-            
-            while True:
-                req = GetFile(
-                    location=location,
-                    offset=offset,
-                    limit=chunk_size
-                )
-                result = await self.client.invoke(req)
-                
-                if not result.bytes:
-                    break
-                
-                yield result.bytes
-                offset += len(result.bytes)
-        except Exception as e:
-            logger.error(f"ByteStreamer Error: {e}")
+    def write(self, data):
+        # Jaise hi data mile, queue me daal do (Sync method called by Pyrogram)
+        self.queue.put_nowait(data)
+        return len(data)
+
+    def close(self):
+        pass
+
+    def flush(self):
+        pass
 
 # --- BOT SETUP ---
 bot = Client(
@@ -56,13 +42,14 @@ routes = web.RouteTableDef()
 
 @routes.get("/")
 async def root_handler(request):
-    return web.Response(text="Bot is Online! 🟢", status=200)
+    return web.Response(text="Bot is Online with Queue System! 🟢", status=200)
 
 @routes.get("/dl/{message_id}")
 async def stream_handler(request):
     try:
         message_id = int(request.match_info['message_id'])
         
+        # 1. File Dhoondna
         try:
             message = await bot.get_messages(chat_id=LOG_CHANNEL_ID, message_ids=message_id)
         except Exception:
@@ -72,40 +59,65 @@ async def stream_handler(request):
         if not media:
             return web.Response(status=404, text="No Media Found")
 
+        # 2. Details
         file_name = getattr(media, "file_name", f"file_{message_id}.mp4")
         file_size = getattr(media, "file_size", 0)
         mime_type = getattr(media, "mime_type", "application/octet-stream")
-        file_id = media.file_id
 
-        # Headers logic
-        range_header = request.headers.get("Range", 0)
-        from_bytes = 0
-        if range_header:
-            try:
-                from_bytes = int(range_header.replace("bytes=", "").split("-")[0])
-            except:
-                from_bytes = 0
-        
-        content_length = file_size - from_bytes
-        status_code = 206 if range_header else 200
-
+        # 3. Headers (Download Start karne ke liye)
         headers = {
             'Content-Type': mime_type,
             'Content-Disposition': f'attachment; filename="{file_name}"',
-            'Accept-Ranges': 'bytes',
-            'Content-Length': str(content_length)
+            'Content-Length': str(file_size)
         }
 
-        response = web.StreamResponse(status=status_code, headers=headers)
+        response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
         
-        # Start Streaming
-        streamer = ByteStreamer(bot, file_id)
-        async for chunk in streamer.yield_chunks(offset=from_bytes):
+        # 4. QUEUE LOGIC (Sabse important hissa)
+        # Hum ek Queue banayenge. Bot usme data dalega, aur Browser wahan se uthayega.
+        
+        data_queue = asyncio.Queue(maxsize=5) # Memory Bachane ke liye maxsize kam rakha hai
+        file_writer = FileLikeObject(data_queue)
+        
+        # Download ko background me start karo (Task)
+        # Hum 'file_name' me apna object denge, taaki Pyrogram usme write kare
+        download_task = asyncio.create_task(
+            bot.download_media(message, file_name=file_writer)
+        )
+
+        # 5. Data User ko bhejna
+        downloaded_bytes = 0
+        
+        while True:
+            # Queue se data nikalo
+            # Hum wait karenge jab tak data na aaye ya download khatam na ho jaye
             try:
+                # 5 second wait karenge data ka
+                chunk = await asyncio.wait_for(data_queue.get(), timeout=5.0)
+                
+                if chunk is None: # End signal
+                    break
+                    
                 await response.write(chunk)
-            except Exception:
+                downloaded_bytes += len(chunk)
+                
+                # Agar download complete ho gaya
+                if downloaded_bytes >= file_size:
+                    break
+                    
+            except asyncio.TimeoutError:
+                # Agar 5 second tak data nahi aaya, check karo ki task zinda hai ya nahi
+                if download_task.done():
+                    break
+                continue
+            except Exception as e:
+                logger.error(f"Stream Error: {e}")
                 break
+
+        # Cleanup
+        if not download_task.done():
+            download_task.cancel()
             
         return response
 
@@ -117,9 +129,8 @@ async def stream_handler(request):
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
     if message.from_user.id not in OWNER_IDS: return
-    await message.reply_text(f"🟢 **Bot Online!**\n{APP_URL}")
+    await message.reply_text(f"🟢 **Queue Bot Online!**\n{APP_URL}")
 
-# ERROR YAHAN THA, AB FIX HAI (Bracket check kar liya hai)
 @bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def file_cmd(client, message):
     if message.from_user.id not in OWNER_IDS: return
