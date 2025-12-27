@@ -1,18 +1,17 @@
-# --- CONFIGURATION FILE ---
+import os
 
-# 1. my.telegram.org se mila ID (Number)
-API_ID = 32531340
+# --- SECURE CONFIG ---
+# Ab hum values direct yahan nahi likhenge
+# Ye values hum Koyeb ki Settings me dalenge
 
-# 2. my.telegram.org se mila Hash (Quotes me)
-API_HASH = "b0f3d86403c3a39f5f1bf3075376e610"
+API_ID = int(os.environ.get("API_ID", "0"))
 
-# 3. BotFather wala Token
-BOT_TOKEN = "8370777456:AAH_V4uGlWxJreUaozi_lNSh_DRJzZvSaI4"
+API_HASH = os.environ.get("API_HASH", "")
 
-# 4. Yahan dono maalik ki ID dalein (Comma laga kar)
-# Example: [123456789, 987654321]
-OWNER_IDS = [8204103018, 800000580]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# 5. Koyeb App URL (Isse baad me update karenge)
-# Example: "https://tg-bot.koyeb.app" (Bina last slash ke)
-APP_URL = "https://example.com"
+# Owner IDs ko comma se split karke list banayenge
+OWNER_IDS = list(map(int, os.environ.get("OWNER_IDS", "0").split(",")))
+
+APP_URL = os.environ.get("APP_URL", "")
+
